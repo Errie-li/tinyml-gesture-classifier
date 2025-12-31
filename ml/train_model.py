@@ -1,56 +1,69 @@
-import os
 import numpy as np
-import pandas as pd
-from glob import glob
-import tensorflow as tf
+import os
+import csv
+from datetime import datetime
 
-DATA_INDEX = "data/raw/dataset_index.csv"
-SAMPLES = 100  
+OUT_DIR = "data/edge_impulse_ready"
+os.makedirs(OUT_DIR, exist_ok=True)
 
-def load_example(fname):
-    df = pd.read_csv(fname)
-    arr = df[['ax','ay','az','gx','gy','gz']].values
-    if arr.shape[0] < SAMPLES:
-        pad = np.zeros((SAMPLES - arr.shape[0], arr.shape[1]))
-        arr = np.vstack([arr, pad])
+SAMPLE_RATE = 50            
+DURATION = 2.0            
+SAMPLES = int(SAMPLE_RATE * DURATION)
+GESTURES = ["idle", "swipe_left", "swipe_right", "circle"]
+EXAMPLES_PER_GESTURE = 60
+
+def gen_idle():
+    ax = 0.01 * np.random.randn(SAMPLES)
+    ay = 0.01 * np.random.randn(SAMPLES)
+    az = 1.0 + 0.02 * np.random.randn(SAMPLES)
+    gx = 0.001 * np.random.randn(SAMPLES)
+    gy = 0.001 * np.random.randn(SAMPLES)
+    gz = 0.001 * np.random.randn(SAMPLES)
+    return np.vstack([ax,ay,az,gx,gy,gz]).T
+
+def gen_swipe(direction="left"):
+    t = np.linspace(0, DURATION, SAMPLES)
+    burst = np.exp(-((t-0.6)**2)/(0.04)) * (1.5) 
+    if direction == "left":
+        ax = -burst + 0.05*np.random.randn(SAMPLES)
     else:
-        arr = arr[:SAMPLES,:]
-    return arr
+        ax = burst + 0.05*np.random.randn(SAMPLES)
+    gx = 0.2 * np.sin(2*np.pi*5*t) + 0.02*np.random.randn(SAMPLES)
+    ay = 0.02*np.random.randn(SAMPLES)
+    az = 1.0 + 0.02*np.random.randn(SAMPLES)
+    gy = 0.01*np.random.randn(SAMPLES)
+    gz = 0.01*np.random.randn(SAMPLES)
+    return np.vstack([ax,ay,az,gx,gy,gz]).T
 
+def gen_circle():
+    t = np.linspace(0, DURATION, SAMPLES)
+    ax = 0.6*np.sin(2*np.pi*1.5*t) + 0.05*np.random.randn(SAMPLES)
+    ay = 0.6*np.cos(2*np.pi*1.5*t) + 0.05*np.random.randn(SAMPLES)
+    az = 1.0 + 0.03*np.random.randn(SAMPLES)
+    gx = 0.4*np.sin(2*np.pi*1.5*t) + 0.02*np.random.randn(SAMPLES)
+    gy = 0.4*np.cos(2*np.pi*1.5*t) + 0.02*np.random.randn(SAMPLES)
+    gz = 0.01*np.random.randn(SAMPLES)
+    return np.vstack([ax,ay,az,gx,gy,gz]).T
 
-idx = pd.read_csv(DATA_INDEX)
-X = []
-y = []
-labels = sorted(idx['label'].unique())
-label_to_i = {l:i for i,l in enumerate(labels)}
-for i, row in idx.iterrows():
-    arr = load_example(row['filename'])
-    X.append(arr)
-    y.append(label_to_i[row['label']])
-X = np.array(X)  
-y = np.array(y)
+generators = {
+    "idle": gen_idle,
+    "swipe_left": lambda: gen_swipe("left"),
+    "swipe_right": lambda: gen_swipe("right"),
+    "circle": gen_circle
+}
 
-X_mean = X.mean(axis=(0,1), keepdims=True)
-X_std = X.std(axis=(0,1), keepdims=True) + 1e-9
-X = (X - X_mean) / X_std
+for gname, gen in generators.items():
+    for i in range(EXAMPLES_PER_GESTURE):
+        data = gen()
+        
+        
+        fname = f"{OUT_DIR}/{gname}.sample{i:03d}.csv"
+        
+        with open(fname, "w", newline='') as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "accX", "accY", "accZ", "gyrX", "gyrY", "gyrZ"])
+            
+            for j, row in enumerate(data):
+                timestamp_ms = int(j * (1000 / SAMPLE_RATE))  
+                w.writerow([timestamp_ms] + row.tolist())
 
-
-model = tf.keras.Sequential([
-    tf.keras.layers.Input(shape=(SAMPLES,6)),
-    tf.keras.layers.Conv1D(32, kernel_size=3, activation='relu'),
-    tf.keras.layers.MaxPool1D(2),
-    tf.keras.layers.Conv1D(64, kernel_size=3, activation='relu'),
-    tf.keras.layers.GlobalAveragePooling1D(),
-    tf.keras.layers.Dense(len(labels), activation='softmax')
-])
-
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-model.fit(X, y, epochs=20, batch_size=8, validation_split=0.15)
-
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]  
-tflite_model = converter.convert()
-with open("ml/model.tflite", "wb") as f:
-    f.write(tflite_model)
-
-print("Saved ml/model.tflite")
